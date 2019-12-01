@@ -342,11 +342,12 @@ class INIT_STAGE_G(nn.Module):
 
 
 class NEXT_STAGE_G(nn.Module):
-    def __init__(self, ngf, nef, ncf):
+    def __init__(self, ngf, nef, ncf, nhw=64):
         super(NEXT_STAGE_G, self).__init__()
         self.gf_dim = ngf
         self.ef_dim = nef
         self.cf_dim = ncf
+        self.hw_size = nhw
         self.num_residual = cfg.GAN.R_NUM
         self.define_module()
 
@@ -358,9 +359,10 @@ class NEXT_STAGE_G(nn.Module):
 
     def define_module(self):
         ngf = self.gf_dim
-        self.att = ATT_NET(ngf, self.ef_dim)
-        self.residual = self._make_layer(ResBlock, ngf * 2)
-        self.upsample = upBlock(ngf * 2, ngf)
+        self.att = ATT_NET(ngf, self.ef_dim, nhw=self.hw_size)
+        ngf_counts = 3
+        self.residual = self._make_layer(ResBlock, ngf * ngf_counts)
+        self.upsample = upBlock(ngf * ngf_counts, ngf)
 
     def forward(self, h_code, c_code, word_embs, mask):
         """
@@ -371,7 +373,8 @@ class NEXT_STAGE_G(nn.Module):
         """
         self.att.applyMask(mask)
         c_code, att = self.att(h_code, word_embs)
-        h_c_code = torch.cat((h_code, c_code), 1)
+        c_code_channel_att, _ = self.att.channelwise(h_code, word_embs)
+        h_c_code = torch.cat((h_code, c_code, c_code_channel_att), 1)
         out_code = self.residual(h_c_code)
 
         # state size ngf/2 x 2in_size x 2in_size
@@ -407,10 +410,10 @@ class G_NET(nn.Module):
             self.img_net1 = GET_IMAGE_G(ngf)
         # gf x 64 x 64
         if cfg.TREE.BRANCH_NUM > 1:
-            self.h_net2 = NEXT_STAGE_G(ngf, nef, ncf)
+            self.h_net2 = NEXT_STAGE_G(ngf, nef, ncf, nhw=64)
             self.img_net2 = GET_IMAGE_G(ngf)
         if cfg.TREE.BRANCH_NUM > 2:
-            self.h_net3 = NEXT_STAGE_G(ngf, nef, ncf)
+            self.h_net3 = NEXT_STAGE_G(ngf, nef, ncf, nhw=128)
             self.img_net3 = GET_IMAGE_G(ngf)
 
     def forward(self, z_code, sent_emb, word_embs, mask):
@@ -461,9 +464,9 @@ class G_DCGAN(nn.Module):
             self.h_net1 = INIT_STAGE_G(ngf * 16, ncf)
         # gf x 64 x 64
         if cfg.TREE.BRANCH_NUM > 1:
-            self.h_net2 = NEXT_STAGE_G(ngf, nef, ncf)
+            self.h_net2 = NEXT_STAGE_G(ngf, nef, ncf, nhw=64)
         if cfg.TREE.BRANCH_NUM > 2:
-            self.h_net3 = NEXT_STAGE_G(ngf, nef, ncf)
+            self.h_net3 = NEXT_STAGE_G(ngf, nef, ncf, nhw=128)
         self.img_net = GET_IMAGE_G(ngf)
 
     def forward(self, z_code, sent_emb, word_embs, mask):
@@ -627,3 +630,43 @@ class D_NET256(nn.Module):
         x_code4 = self.img_code_s64_1(x_code4)
         x_code4 = self.img_code_s64_2(x_code4)
         return x_code4
+
+
+from collections import namedtuple
+
+import torch
+from torchvision import models
+
+
+class Vgg16(torch.nn.Module):
+    def __init__(self, requires_grad=False):
+        super(Vgg16, self).__init__()
+        vgg_pretrained_features = models.vgg16(pretrained=True).features
+        self.slice1 = torch.nn.Sequential()
+        self.slice2 = torch.nn.Sequential()
+        self.slice3 = torch.nn.Sequential()
+        self.slice4 = torch.nn.Sequential()
+        for x in range(4):
+            self.slice1.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(4, 9):
+            self.slice2.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(9, 16):
+            self.slice3.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(16, 23):
+            self.slice4.add_module(str(x), vgg_pretrained_features[x])
+        if not requires_grad:
+            for param in self.parameters():
+                param.requires_grad = False
+
+    def forward(self, X):
+        h = self.slice1(X)
+        h_relu1_2 = h
+        h = self.slice2(h)
+        h_relu2_2 = h
+        h = self.slice3(h)
+        h_relu3_3 = h
+        h = self.slice4(h)
+        h_relu4_3 = h
+        vgg_outputs = namedtuple("VggOutputs", ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3'])
+        out = vgg_outputs(h_relu1_2, h_relu2_2, h_relu3_3, h_relu4_3)
+        return out

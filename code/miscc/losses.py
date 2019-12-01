@@ -132,9 +132,21 @@ def words_loss(img_features, words_emb, labels,
     return loss0, loss1, att_maps
 
 
+def word_level_disc_loss(wld, img_features, words_emb, cap_lens):
+    loss = wld(img_features, words_emb, cap_lens)
+    return loss
+
+
+def perceptual_loss(vgg, real_img, fake_img):
+    real_feat = vgg(real_img).relu2_2
+    fake_feat = vgg(real_img).relu2_2
+    ret = (fake_feat - real_feat).pow(2).flatten(start_dim=1).mean(dim=1)
+    return ret
+
+
 # ##################Loss for G and Ds##############################
 def discriminator_loss(netD, real_imgs, fake_imgs, conditions,
-                       real_labels, fake_labels):
+                       real_labels, fake_labels, wld, words_embs, cap_lens):
     # Forward
     real_features = netD(real_imgs)
     fake_features = netD(fake_imgs.detach())
@@ -158,12 +170,19 @@ def discriminator_loss(netD, real_imgs, fake_imgs, conditions,
                 (fake_errD + cond_fake_errD + cond_wrong_errD) / 3.)
     else:
         errD = cond_real_errD + (cond_fake_errD + cond_wrong_errD) / 2.
+
+    right_corre = word_level_disc_loss(wld, real_imgs, words_embs, cap_lens).mean()
+    wrong_corre = word_level_disc_loss(
+        wld, real_imgs[:(batch_size - 1)],
+        words_embs[1:batch_size], cap_lens[1:batch_size]).mean()
+    lamba_corre = 0.1
+    errD += lamba_corre * (wrong_corre - right_corre)
     return errD
 
 
 def generator_loss(netsD, image_encoder, fake_imgs, real_labels,
                    words_embs, sent_emb, match_labels,
-                   cap_lens, class_ids):
+                   cap_lens, class_ids, wld, vgg, real_imgs):
     numDs = len(netsD)
     batch_size = real_labels.size(0)
     logs = ''
@@ -181,7 +200,7 @@ def generator_loss(netsD, image_encoder, fake_imgs, real_labels,
             g_loss = cond_errG
         errG_total += g_loss
         # err_img = errG_total.data[0]
-        logs += 'g_loss%d: %.2f ' % (i, g_loss.data[0])
+        logs += 'g_loss%d: %.2f ' % (i, g_loss.data.item())
 
         # Ranking loss
         if i == (numDs - 1):
@@ -202,7 +221,15 @@ def generator_loss(netsD, image_encoder, fake_imgs, real_labels,
             # err_sent = err_sent + s_loss.data[0]
 
             errG_total += w_loss + s_loss
-            logs += 'w_loss: %.2f s_loss: %.2f ' % (w_loss.data[0], s_loss.data[0])
+            logs += 'w_loss: %.2f s_loss: %.2f ' % (w_loss.data.item(), s_loss.data.item())
+            
+            corre = word_level_disc_loss(wld, fake_imgs[i], words_embs, cap_lens).mean()
+            lambda3 = 0.1
+            errG_total += (lambda3 * -corre)
+        
+        lambda2 = 0.1
+        perc_loss = perceptual_loss(vgg, real_imgs[i], fake_imgs[i]).mean()
+        errG_total += (lambda2 * perc_loss)
     return errG_total, logs
 
 

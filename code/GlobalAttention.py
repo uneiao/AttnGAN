@@ -48,7 +48,7 @@ def func_attention(query, context, gamma1):
     attn = torch.bmm(contextT, query) # Eq. (7) in AttnGAN paper
     # --> batch*sourceL x queryL
     attn = attn.view(batch_size*sourceL, queryL)
-    attn = nn.Softmax()(attn)  # Eq. (8)
+    attn = nn.Softmax(dim=1)(attn)  # Eq. (8)
 
     # --> batch x sourceL x queryL
     attn = attn.view(batch_size, sourceL, queryL)
@@ -57,7 +57,7 @@ def func_attention(query, context, gamma1):
     attn = attn.view(batch_size*queryL, sourceL)
     #  Eq. (9)
     attn = attn * gamma1
-    attn = nn.Softmax()(attn)
+    attn = nn.Softmax(dim=1)(attn)
     attn = attn.view(batch_size, queryL, sourceL)
     # --> batch x sourceL x queryL
     attnT = torch.transpose(attn, 1, 2).contiguous()
@@ -70,10 +70,11 @@ def func_attention(query, context, gamma1):
 
 
 class GlobalAttentionGeneral(nn.Module):
-    def __init__(self, idf, cdf):
+    def __init__(self, idf, cdf, nhw=64):
         super(GlobalAttentionGeneral, self).__init__()
         self.conv_context = conv1x1(cdf, idf)
-        self.sm = nn.Softmax()
+        self.conv_context_ch = conv1x1(cdf, nhw**2)
+        self.sm = nn.Softmax(dim=-1)
         self.mask = None
 
     def applyMask(self, mask):
@@ -119,3 +120,37 @@ class GlobalAttentionGeneral(nn.Module):
         attn = attn.view(batch_size, -1, ih, iw)
 
         return weightedContext, attn
+
+    def channelwise(self, input, context):
+        """
+            input: batch x idf x ih x iw (queryL=ihxiw)
+            context: batch x cdf x sourceL
+        """
+        ih, iw = input.size(2), input.size(3)
+        queryL = input.size(1)
+        batch_size, sourceL = context.size(0), context.size(2)
+
+        targetT = input.view(batch_size, queryL, -1)
+        sourceT = context.unsqueeze(3)
+        # --> batch x idf(=h*w) x sourceL
+        sourceT = self.conv_context_ch(sourceT).squeeze(3)
+        
+        # batch x queryL x sourceL:  channel_num x word_num
+        attn = torch.bmm(targetT, sourceT)
+        attn = attn.view(batch_size*queryL, sourceL)
+        if self.mask is not None:
+            # batch_size x sourceL --> batch_size*queryL x sourceL
+            mask = self.mask.repeat(queryL, 1)
+            attn.data.masked_fill_(mask.data, -float('inf'))
+        attn = self.sm(attn)  # Eq. (2)
+        # batch x channel_num x word_num
+        attn = attn.view(batch_size, queryL, sourceL)
+        
+        sourceTT = torch.transpose(sourceT, 1, 2).contiguous()
+        # (batch x idf x sourceL)(batch x sourceL x queryL)
+        # --> batch x idf x queryL
+        weightedContext = torch.bmm(attn, sourceTT)
+        weightedContext = weightedContext.view(batch_size, -1, ih, iw)
+        #attn = attn.view(batch_size, -1, ih, iw)
+        return weightedContext, attn 
+

@@ -15,7 +15,7 @@ from miscc.utils import build_super_images, build_super_images2
 from miscc.utils import weights_init, load_params, copy_G_params
 from model import G_DCGAN, G_NET
 from datasets import prepare_data
-from model import RNN_ENCODER, CNN_ENCODER
+from model import RNN_ENCODER, CNN_ENCODER, Vgg16
 
 from miscc.losses import words_loss
 from miscc.losses import discriminator_loss, generator_loss, KL_loss
@@ -217,6 +217,12 @@ class condGANTrainer(object):
 
     def train(self):
         text_encoder, image_encoder, netG, netsD, start_epoch = self.build_models()
+        from word_level_disc import WordLevelDiscriminator
+        wld = WordLevelDiscriminator(image_encoder, cfg.TEXT.EMBEDDING_DIM, cfg.TEXT.EMBEDDING_DIM)
+        vgg = Vgg16()
+        if cfg.CUDA:
+            wld = wld.cuda()
+            vgg = vgg.cuda()
         avg_param_G = copy_G_params(netG)
         optimizerG, optimizersD = self.define_optimizers(netG, netsD)
         real_labels, fake_labels, match_labels = self.prepare_labels()
@@ -269,12 +275,13 @@ class condGANTrainer(object):
                 for i in range(len(netsD)):
                     netsD[i].zero_grad()
                     errD = discriminator_loss(netsD[i], imgs[i], fake_imgs[i],
-                                              sent_emb, real_labels, fake_labels)
+                                              sent_emb, real_labels, fake_labels,
+                                              wld, words_embs, cap_lens)
                     # backward and update parameters
                     errD.backward()
                     optimizersD[i].step()
                     errD_total += errD
-                    D_logs += 'errD%d: %.2f ' % (i, errD.data[0])
+                    D_logs += 'errD%d: %.2f ' % (i, errD.data.item())
 
                 #######################################################
                 # (4) Update G network: maximize log(D(G(z)))
@@ -288,10 +295,10 @@ class condGANTrainer(object):
                 netG.zero_grad()
                 errG_total, G_logs = \
                     generator_loss(netsD, image_encoder, fake_imgs, real_labels,
-                                   words_embs, sent_emb, match_labels, cap_lens, class_ids)
+                                   words_embs, sent_emb, match_labels, cap_lens, class_ids, wld, vgg, imgs)
                 kl_loss = KL_loss(mu, logvar)
                 errG_total += kl_loss
-                G_logs += 'kl_loss: %.2f ' % kl_loss.data[0]
+                G_logs += 'kl_loss: %.2f ' % kl_loss.data.item()
                 # backward and update parameters
                 errG_total.backward()
                 optimizerG.step()
@@ -318,7 +325,7 @@ class condGANTrainer(object):
             print('''[%d/%d][%d]
                   Loss_D: %.2f Loss_G: %.2f Time: %.2fs'''
                   % (epoch, self.max_epoch, self.num_batches,
-                     errD_total.data[0], errG_total.data[0],
+                     errD_total.data.item(), errG_total.data.item(),
                      end_t - start_t))
 
             if epoch % cfg.TRAIN.SNAPSHOT_INTERVAL == 0:  # and epoch != 0:

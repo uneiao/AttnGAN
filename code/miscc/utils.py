@@ -11,6 +11,7 @@ from copy import deepcopy
 import skimage.transform
 
 from miscc.config import cfg
+import cv2
 
 
 # For visualization ################################################
@@ -127,9 +128,10 @@ def build_super_images(real_imgs, captions, ixtoword,
         for j in range(num_attn):
             one_map = attn[j]
             if (vis_size // att_sze) > 1:
-                one_map = \
-                    skimage.transform.pyramid_expand(one_map, sigma=20,
-                                                     upscale=vis_size // att_sze)
+                #one_map = \
+                #    skimage.transform.pyramid_expand(one_map, sigma=20,
+                #                                     upscale=vis_size // att_sze)
+                one_map = cv2.resize(one_map, None, fx=vis_size // att_sze, fy=vis_size // att_sze)
             row_beforeNorm.append(one_map)
             minV = one_map.min()
             maxV = one_map.max()
